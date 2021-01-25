@@ -3,7 +3,6 @@
  *
  * Copyright (C) 2006 Johannes Schindelin
  */
-#define USE_THE_INDEX_COMPATIBILITY_MACROS
 #include "builtin.h"
 #include "config.h"
 #include "pathspec.h"
@@ -75,13 +74,14 @@ static const char *add_slash(const char *path)
 
 #define SUBMODULE_WITH_GITDIR ((const char *)1)
 
-static void prepare_move_submodule(const char *src, int first,
+static void prepare_move_submodule(struct index_state *istate,
+				   const char *src, int first,
 				   const char **submodule_gitfile)
 {
 	struct strbuf submodule_dotgit = STRBUF_INIT;
-	if (!S_ISGITLINK(active_cache[first]->ce_mode))
+	if (!S_ISGITLINK(istate->cache[first]->ce_mode))
 		die(_("Directory %s is in index and no submodule?"), src);
-	if (!is_staging_gitmodules_ok(&the_index))
+	if (!is_staging_gitmodules_ok(istate))
 		die(_("Please stage your changes to .gitmodules or stash them to proceed"));
 	strbuf_addf(&submodule_dotgit, "%s/.git", src);
 	*submodule_gitfile = read_gitfile(submodule_dotgit.buf);
@@ -92,19 +92,20 @@ static void prepare_move_submodule(const char *src, int first,
 	strbuf_release(&submodule_dotgit);
 }
 
-static int index_range_of_same_dir(const char *src, int length,
+static int index_range_of_same_dir(struct index_state *istate,
+				   const char *src, int length,
 				   int *first_p, int *last_p)
 {
 	const char *src_w_slash = add_slash(src);
 	int first, last, len_w_slash = length + 1;
 
-	first = cache_name_pos(src_w_slash, len_w_slash);
+	first = index_name_pos(istate, src_w_slash, len_w_slash);
 	if (first >= 0)
 		die(_("%.*s is in index"), len_w_slash, src_w_slash);
 
 	first = -1 - first;
-	for (last = first; last < active_nr; last++) {
-		const char *path = active_cache[last]->name;
+	for (last = first; last < istate->cache_nr; last++) {
+		const char *path = istate->cache[last]->name;
 		if (strncmp(path, src_w_slash, len_w_slash))
 			break;
 	}
@@ -133,6 +134,7 @@ int cmd_mv(int argc, const char **argv, const char *prefix)
 	struct string_list src_for_dst = STRING_LIST_INIT_NODUP;
 	struct lock_file lock_file = LOCK_INIT;
 	struct cache_entry *ce;
+	struct index_state *istate;
 
 	git_config(git_default_config, NULL);
 
@@ -141,9 +143,10 @@ int cmd_mv(int argc, const char **argv, const char *prefix)
 	if (--argc < 1)
 		usage_with_options(builtin_mv_usage, builtin_mv_options);
 
-	hold_locked_index(&lock_file, LOCK_DIE_ON_ERROR);
-	if (read_cache() < 0)
+	repo_hold_locked_index(the_repository, &lock_file, LOCK_DIE_ON_ERROR);
+	if (repo_read_index(the_repository) < 0)
 		die(_("index file corrupt"));
+	istate = the_repository->index;
 
 	source = internal_prefix_pathspec(prefix, argv, argc, 0);
 	modes = xcalloc(argc, sizeof(enum update_mode));
@@ -190,12 +193,13 @@ int cmd_mv(int argc, const char **argv, const char *prefix)
 				&& lstat(dst, &st) == 0)
 			bad = _("cannot move directory over file");
 		else if (src_is_dir) {
-			int first = cache_name_pos(src, length), last;
+			int first = index_name_pos(istate, src, length);
+			int last;
 
 			if (first >= 0)
-				prepare_move_submodule(src, first,
+				prepare_move_submodule(istate, src, first,
 						       submodule_gitfile + i);
-			else if (index_range_of_same_dir(src, length,
+			else if (index_range_of_same_dir(istate, src, length,
 							 &first, &last) < 1)
 				bad = _("source directory is empty");
 			else { /* last - first >= 1 */
@@ -212,7 +216,7 @@ int cmd_mv(int argc, const char **argv, const char *prefix)
 				dst_len = strlen(dst);
 
 				for (j = 0; j < last - first; j++) {
-					const char *path = active_cache[first + j]->name;
+					const char *path = istate->cache[first + j]->name;
 					source[argc + j] = path;
 					destination[argc + j] =
 						prefix_path(dst, dst_len, path + length + 1);
@@ -221,7 +225,7 @@ int cmd_mv(int argc, const char **argv, const char *prefix)
 				}
 				argc += last - first;
 			}
-		} else if (!(ce = cache_file_exists(src, length, ignore_case))) {
+		} else if (!(ce = index_file_exists(istate, src, length, ignore_case))) {
 			bad = _("not under version control");
 		} else if (ce_stage(ce)) {
 			bad = _("conflicted");
@@ -291,15 +295,15 @@ int cmd_mv(int argc, const char **argv, const char *prefix)
 		if (mode == WORKING_DIRECTORY)
 			continue;
 
-		pos = cache_name_pos(src, strlen(src));
+		pos = index_name_pos(istate, src, strlen(src));
 		assert(pos >= 0);
-		rename_cache_entry_at(pos, dst);
+		rename_index_entry_at(istate, pos, dst);
 	}
 
 	if (gitmodules_modified)
-		stage_updated_gitmodules(&the_index);
+		stage_updated_gitmodules(istate);
 
-	if (write_locked_index(&the_index, &lock_file,
+	if (write_locked_index(istate, &lock_file,
 			       COMMIT_LOCK | SKIP_IF_UNCHANGED))
 		die(_("Unable to write new index file"));
 

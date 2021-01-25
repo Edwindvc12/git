@@ -3,7 +3,6 @@
  *
  * Copyright (C) Linus Torvalds 2006
  */
-#define USE_THE_INDEX_COMPATIBILITY_MACROS
 #include "builtin.h"
 #include "config.h"
 #include "lockfile.h"
@@ -29,12 +28,14 @@ static struct {
 	} *entry;
 } list;
 
-static int get_ours_cache_pos(const char *path, int pos)
+static int get_ours_cache_pos(struct index_state *istate,
+			      const char *path, int pos)
 {
 	int i = -pos - 1;
 
-	while ((i < active_nr) && !strcmp(active_cache[i]->name, path)) {
-		if (ce_stage(active_cache[i]) == 2)
+	while ((i < istate->cache_nr) &&
+	       !strcmp(istate->cache[i]->name, path)) {
+		if (ce_stage(istate->cache[i]) == 2)
 			return i;
 		i++;
 	}
@@ -62,7 +63,7 @@ static void print_error_files(struct string_list *files_list,
 	}
 }
 
-static void submodules_absorb_gitdir_if_needed(void)
+static void submodules_absorb_gitdir_if_needed(struct index_state *istate)
 {
 	int i;
 	for (i = 0; i < list.nr; i++) {
@@ -70,13 +71,13 @@ static void submodules_absorb_gitdir_if_needed(void)
 		int pos;
 		const struct cache_entry *ce;
 
-		pos = cache_name_pos(name, strlen(name));
+		pos = index_name_pos(istate, name, strlen(name));
 		if (pos < 0) {
-			pos = get_ours_cache_pos(name, pos);
+			pos = get_ours_cache_pos(istate, name, pos);
 			if (pos < 0)
 				continue;
 		}
-		ce = active_cache[pos];
+		ce = istate->cache[pos];
 
 		if (!S_ISGITLINK(ce->ce_mode) ||
 		    !file_exists(ce->name) ||
@@ -89,7 +90,8 @@ static void submodules_absorb_gitdir_if_needed(void)
 	}
 }
 
-static int check_local_mod(struct object_id *head, int index_only)
+static int check_local_mod(struct index_state *istate,
+			   struct object_id *head, int index_only)
 {
 	/*
 	 * Items in list are already sorted in the cache order,
@@ -115,21 +117,21 @@ static int check_local_mod(struct object_id *head, int index_only)
 		int local_changes = 0;
 		int staged_changes = 0;
 
-		pos = cache_name_pos(name, strlen(name));
+		pos = index_name_pos(istate, name, strlen(name));
 		if (pos < 0) {
 			/*
 			 * Skip unmerged entries except for populated submodules
 			 * that could lose history when removed.
 			 */
-			pos = get_ours_cache_pos(name, pos);
+			pos = get_ours_cache_pos(istate, name, pos);
 			if (pos < 0)
 				continue;
 
-			if (!S_ISGITLINK(active_cache[pos]->ce_mode) ||
+			if (!S_ISGITLINK(istate->cache[pos]->ce_mode) ||
 			    is_empty_dir(name))
 				continue;
 		}
-		ce = active_cache[pos];
+		ce = istate->cache[pos];
 
 		if (lstat(ce->name, &st) < 0) {
 			if (!is_missing_file_error(errno))
@@ -166,7 +168,7 @@ static int check_local_mod(struct object_id *head, int index_only)
 		 * Is the index different from the file in the work tree?
 		 * If it's a submodule, is its work tree modified?
 		 */
-		if (ce_match_stat(ce, &st, 0) ||
+		if (ie_match_stat(istate, ce, &st, 0) ||
 		    (S_ISGITLINK(ce->ce_mode) &&
 		     bad_to_remove_submodule(ce->name,
 				SUBMODULE_REMOVAL_DIE_ON_ERROR |
@@ -258,6 +260,7 @@ int cmd_rm(int argc, const char **argv, const char *prefix)
 	int i, sparse_paths_only;
 	struct pathspec pathspec;
 	char *seen;
+	struct index_state *istate;
 
 	git_config(git_default_config, NULL);
 
@@ -285,29 +288,30 @@ int cmd_rm(int argc, const char **argv, const char *prefix)
 	if (!index_only)
 		setup_work_tree();
 
-	hold_locked_index(&lock_file, LOCK_DIE_ON_ERROR);
+	repo_hold_locked_index(the_repository, &lock_file, LOCK_DIE_ON_ERROR);
 
-	if (read_cache() < 0)
+	if (repo_read_index(the_repository) < 0)
 		die(_("index file corrupt"));
 
-	refresh_index(&the_index, REFRESH_QUIET|REFRESH_UNMERGED, &pathspec, NULL, NULL);
+	istate = the_repository->index;
+	refresh_index(istate, REFRESH_QUIET|REFRESH_UNMERGED, &pathspec, NULL, NULL);
 
 	seen = xcalloc(pathspec.nr, 1);
 
 	sparse_paths_only = core_apply_sparse_checkout &&
 			    restrict_to_sparse_paths(the_repository);
 
-	for (i = 0; i < active_nr; i++) {
-		const struct cache_entry *ce = active_cache[i];
+	for (i = 0; i < istate->cache_nr; i++) {
+		const struct cache_entry *ce = istate->cache[i];
 		if (sparse_paths_only && ce_skip_worktree(ce))
 			continue;
-		if (!ce_path_match(&the_index, ce, &pathspec, seen))
+		if (!ce_path_match(istate, ce, &pathspec, seen))
 			continue;
 		ALLOC_GROW(list.entry, list.nr + 1, list.alloc);
 		list.entry[list.nr].name = xstrdup(ce->name);
 		list.entry[list.nr].is_submodule = S_ISGITLINK(ce->ce_mode);
 		if (list.entry[list.nr++].is_submodule &&
-		    !is_staging_gitmodules_ok(&the_index))
+		    !is_staging_gitmodules_ok(istate))
 			die(_("please stage your changes to .gitmodules or stash them to proceed"));
 	}
 
@@ -337,7 +341,7 @@ int cmd_rm(int argc, const char **argv, const char *prefix)
 	}
 
 	if (!index_only)
-		submodules_absorb_gitdir_if_needed();
+		submodules_absorb_gitdir_if_needed(istate);
 
 	/*
 	 * If not forced, the file, the index and the HEAD (if exists)
@@ -353,7 +357,7 @@ int cmd_rm(int argc, const char **argv, const char *prefix)
 		struct object_id oid;
 		if (get_oid("HEAD", &oid))
 			oidclr(&oid);
-		if (check_local_mod(&oid, index_only))
+		if (check_local_mod(istate, &oid, index_only))
 			exit(1);
 	}
 
@@ -366,7 +370,7 @@ int cmd_rm(int argc, const char **argv, const char *prefix)
 		if (!quiet)
 			printf("rm '%s'\n", path);
 
-		if (remove_file_from_cache(path))
+		if (remove_file_from_index(istate, path))
 			die(_("git rm: unable to remove %s"), path);
 	}
 
@@ -406,10 +410,10 @@ int cmd_rm(int argc, const char **argv, const char *prefix)
 		}
 		strbuf_release(&buf);
 		if (gitmodules_modified)
-			stage_updated_gitmodules(&the_index);
+			stage_updated_gitmodules(istate);
 	}
 
-	if (write_locked_index(&the_index, &lock_file,
+	if (write_locked_index(istate, &lock_file,
 			       COMMIT_LOCK | SKIP_IF_UNCHANGED))
 		die(_("Unable to write new index file"));
 

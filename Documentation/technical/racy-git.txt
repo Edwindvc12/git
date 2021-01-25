@@ -26,7 +26,7 @@ information obtained from the filesystem via `lstat(2)` system
 call when they were last updated.  When checking if they differ,
 Git first runs `lstat(2)` on the files and compares the result
 with this information (this is what was originally done by the
-`ce_match_stat()` function, but the current code does it in
+`ie_match_stat()` function, but the current code does it in
 `ce_match_stat_basic()` function).  If some of these "cached
 stat information" fields do not match, Git can tell that the
 files are modified without even looking at their contents.
@@ -102,7 +102,7 @@ timestamp as the index file itself.
 
 The callers that want to check if an index entry matches the
 corresponding file in the working tree continue to call
-`ce_match_stat()`, but with this change, `ce_match_stat()` uses
+`ie_match_stat()`, but with this change, `ie_match_stat()` uses
 `ce_modified_check_fs()` to see if racily clean ones are
 actually clean after comparing the cached stat information using
 `ce_match_stat_basic()`.
@@ -128,7 +128,7 @@ Runtime penalty
 ---------------
 
 The runtime penalty of falling back to `ce_modified_check_fs()`
-from `ce_match_stat()` can be very expensive when there are many
+from `ie_match_stat()` can be very expensive when there are many
 racily clean entries.  An obvious way to artificially create
 this situation is to give the same timestamp to all the files in
 the working tree in a large project, run `git update-index` on
