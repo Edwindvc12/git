@@ -28,6 +28,19 @@ Finally, the list of matching commits is shown in the order of the
 second commit range, with unmatched commits being inserted just after
 all of their ancestors have been shown.
 
+There are three ways to specify the commit ranges:
+
+- `<range1> <range2>`: Either commit range can be of the form
+  `<base>..<rev>`, `<rev>^!` or `<rev>^-<n>`. See `SPECIFYING RANGES`
+  in linkgit:gitrevisions[7] for more details.
+
+- `<rev1>...<rev2>`. This resembles the symmetric ranges mentioned in
+  the `SPECIFYING RANGES` section of linkgit:gitrevisions[7], and is
+  equivalent to `<base>..<rev1> <base>..<rev2>` where `<base>` is the
+  merge base as obtained via `git merge-base <rev1> <rev2>`.
+
+- `<base> <rev1> <rev2>`: This is equivalent to `<base>..<rev1>
+  <base>..<rev2>`.
 
 OPTIONS
 -------

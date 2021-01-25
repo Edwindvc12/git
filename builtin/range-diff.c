@@ -11,6 +11,30 @@ N_("git range-diff [<options>] <base> <old-tip> <new-tip>"),
 NULL
 };
 
+static int is_range(const char *range)
+{
+	size_t i;
+	char c;
+
+	if (strstr(range, ".."))
+		return 1;
+
+	i = strlen(range);
+	c = i ? range[--i] : 0;
+	if (c == '!')
+		i--; /* might be ...^! or ...^@ */
+	else if (isdigit(c)) {
+		/* handle ...^-<n> */
+		while (i > 2 && isdigit(range[--i]))
+			; /* keep trimming trailing digits */
+		if (i < 2 || range[i--] != '-')
+			return 0;
+	} else
+		return 0;
+
+	return i > 0 && range[i] == '^';
+}
+
 int cmd_range_diff(int argc, const char **argv, const char *prefix)
 {
 	int creation_factor = RANGE_DIFF_CREATION_FACTOR_DEFAULT;
@@ -46,12 +70,12 @@ int cmd_range_diff(int argc, const char **argv, const char *prefix)
 		diffopt.use_color = 1;
 
 	if (argc == 2) {
-		if (!strstr(argv[0], ".."))
-			die(_("no .. in range: '%s'"), argv[0]);
+		if (!is_range(argv[0]))
+			die(_("not a commit range: '%s'"), argv[0]);
 		strbuf_addstr(&range1, argv[0]);
 
-		if (!strstr(argv[1], ".."))
-			die(_("no .. in range: '%s'"), argv[1]);
+		if (!is_range(argv[1]))
+			die(_("not a commit range: '%s'"), argv[1]);
 		strbuf_addstr(&range2, argv[1]);
 	} else if (argc == 3) {
 		strbuf_addf(&range1, "%s..%s", argv[0], argv[1]);
