@@ -135,6 +135,25 @@ depth is 4095.
 	leading directory (e.g. `pack-123.pack`). The option could be
 	specified multiple times to keep multiple packs.
 
+--keep-pack-stdin::
+	Take a list of line-delimited `<pack-name>` arguments, treating
+	them as if they were each passed as `--keep-pack=<pack-name>`.
+	Useful for when many packs are being kept to avoid argument
+	length limitations. Requires that `--revs` be passed or implied,
+	but does not allow the caller to pass additional traversal
+	arguments over standard input.
+
+--assume-kept-packs-closed::
+	This flag causes `git rev-list` to halt the object traversal
+	when it encounters an object found in a kept pack. This is
+	dissimilar to `--honor-pack-keep`, which only prunes unwanted
+	results after the full traversal is completed.
++
+Without any `--keep-pack=<pack-name>` arguments, only packs with an
+on-disk `*.keep` files are used when considering when to halt the
+traversal. If other packs are artificially marked as "kept" with
+`--keep-pack`, then those are considered as well.
+
 --incremental::
 	This flag causes an object already in a pack to be ignored
 	even if it would have otherwise been packed.

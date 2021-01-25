@@ -78,6 +78,7 @@ static int have_non_local_packs;
 static int incremental;
 static int ignore_packed_keep_on_disk;
 static int ignore_packed_keep_in_core;
+static int assume_kept_packs_closed;
 static int allow_ofs_delta;
 static struct pack_idx_option pack_idx_opts;
 static const char *base_name;
@@ -1188,7 +1189,8 @@ static int have_duplicate_entry(const struct object_id *oid,
 	return 1;
 }
 
-static int want_found_object(int exclude, struct packed_git *p)
+static int want_found_object(const struct object_id *oid, int exclude,
+			     struct packed_git *p)
 {
 	if (exclude)
 		return 1;
@@ -1209,19 +1211,70 @@ static int want_found_object(int exclude, struct packed_git *p)
 	 * Otherwise, we signal "-1" at the end to tell the caller that we do
 	 * not know either way, and it needs to check more packs.
 	 */
-	if (!ignore_packed_keep_on_disk &&
-	    !ignore_packed_keep_in_core &&
-	    (!local || !have_non_local_packs))
-		return 1;
 
+	/*
+	 * Handle .keep first, as we have a fast(er) path there.
+	 */
+	if (ignore_packed_keep_on_disk || ignore_packed_keep_in_core) {
+		/*
+		 * Set the flags for the kept-pack cache to be the ones we want
+		 * to ignore.
+		 *
+		 * That is, if we are ignoring objects in on-disk keep packs,
+		 * then we want to search through the on-disk keep and ignore
+		 * the in-core ones.
+		 */
+		unsigned flags = 0;
+		if (ignore_packed_keep_on_disk)
+			flags |= CACHE_ON_DISK_KEEP_PACKS;
+		if (ignore_packed_keep_in_core)
+			flags |= CACHE_IN_CORE_KEEP_PACKS;
+
+		if (ignore_packed_keep_on_disk && p->pack_keep)
+			return 0;
+		if (ignore_packed_keep_in_core && p->pack_keep_in_core)
+			return 0;
+		if (has_object_kept_pack(oid, flags))
+			return 0;
+	}
+
+	/*
+	 * At this point we know definitively that either we don't care about
+	 * keep-packs, or the object is not in one. Keep checking other
+	 * conditions...
+	 */
+
+	if (!local || !have_non_local_packs)
+		return 1;
 	if (local && !p->pack_local)
-		return 0;
-	if (p->pack_local &&
-	    ((ignore_packed_keep_on_disk && p->pack_keep) ||
-	     (ignore_packed_keep_in_core && p->pack_keep_in_core)))
 		return 0;
 
 	/* we don't know yet; keep looking for more packs */
+	return -1;
+}
+
+static int want_object_in_pack_one(struct packed_git *p,
+				   const struct object_id *oid,
+				   int exclude,
+				   struct packed_git **found_pack,
+				   off_t *found_offset)
+{
+	off_t offset;
+
+	if (p == *found_pack)
+		offset = *found_offset;
+	else
+		offset = find_pack_entry_one(oid->hash, p);
+
+	if (offset) {
+		if (!*found_pack) {
+			if (!is_pack_valid(p))
+				return -1;
+			*found_offset = offset;
+			*found_pack = p;
+		}
+		return want_found_object(oid, exclude, p);
+	}
 	return -1;
 }
 
@@ -1252,7 +1305,7 @@ static int want_object_in_pack(const struct object_id *oid,
 	 * are present we will determine the answer right now.
 	 */
 	if (*found_pack) {
-		want = want_found_object(exclude, *found_pack);
+		want = want_found_object(oid, exclude, *found_pack);
 		if (want != -1)
 			return want;
 	}
@@ -1260,51 +1313,20 @@ static int want_object_in_pack(const struct object_id *oid,
 	for (m = get_multi_pack_index(the_repository); m; m = m->next) {
 		struct pack_entry e;
 		if (fill_midx_entry(the_repository, oid, &e, m)) {
-			struct packed_git *p = e.p;
-			off_t offset;
-
-			if (p == *found_pack)
-				offset = *found_offset;
-			else
-				offset = find_pack_entry_one(oid->hash, p);
-
-			if (offset) {
-				if (!*found_pack) {
-					if (!is_pack_valid(p))
-						continue;
-					*found_offset = offset;
-					*found_pack = p;
-				}
-				want = want_found_object(exclude, p);
-				if (want != -1)
-					return want;
-			}
+			want = want_object_in_pack_one(e.p, oid, exclude, found_pack, found_offset);
+			if (want != -1)
+				return want;
 		}
 	}
 
 	list_for_each(pos, get_packed_git_mru(the_repository)) {
 		struct packed_git *p = list_entry(pos, struct packed_git, mru);
-		off_t offset;
-
-		if (p == *found_pack)
-			offset = *found_offset;
-		else
-			offset = find_pack_entry_one(oid->hash, p);
-
-		if (offset) {
-			if (!*found_pack) {
-				if (!is_pack_valid(p))
-					continue;
-				*found_offset = offset;
-				*found_pack = p;
-			}
-			want = want_found_object(exclude, p);
-			if (!exclude && want > 0)
-				list_move(&p->mru,
-					  get_packed_git_mru(the_repository));
-			if (want != -1)
-				return want;
-		}
+		want = want_object_in_pack_one(p, oid, exclude, found_pack, found_offset);
+		if (!exclude && want > 0)
+			list_move(&p->mru,
+				  get_packed_git_mru(the_repository));
+		if (want != -1)
+			return want;
 	}
 
 	if (uri_protocols.nr) {
@@ -3339,7 +3361,7 @@ static void record_recent_commit(struct commit *commit, void *data)
 	oid_array_append(&recent_objects, &commit->object.oid);
 }
 
-static void get_object_list(int ac, const char **av)
+static void get_object_list(int ac, const char **av, int read_from_stdin)
 {
 	struct rev_info revs;
 	struct setup_revision_opt s_r_opt = {
@@ -3359,7 +3381,7 @@ static void get_object_list(int ac, const char **av)
 	save_warning = warn_on_object_refname_ambiguity;
 	warn_on_object_refname_ambiguity = 0;
 
-	while (fgets(line, sizeof(line), stdin) != NULL) {
+	while (read_from_stdin && fgets(line, sizeof(line), stdin) != NULL) {
 		int len = strlen(line);
 		if (len && line[len - 1] == '\n')
 			line[--len] = 0;
@@ -3483,6 +3505,15 @@ static int option_parse_unpack_unreachable(const struct option *opt,
 	return 0;
 }
 
+static void collect_kept_packs(struct string_list *keep_pack_list)
+{
+	struct strbuf buf = STRBUF_INIT;
+	while (strbuf_getline(&buf, stdin) != EOF)
+		string_list_append(keep_pack_list,
+				   strbuf_detach(&buf, NULL));
+	strbuf_release(&buf);
+}
+
 int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 {
 	int use_internal_rev_list = 0;
@@ -3492,6 +3523,7 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 	int rev_list_unpacked = 0, rev_list_all = 0, rev_list_reflog = 0;
 	int rev_list_index = 0;
 	struct string_list keep_pack_list = STRING_LIST_INIT_NODUP;
+	int keep_pack_stdin = 0;
 	struct option pack_objects_options[] = {
 		OPT_SET_INT('q', "quiet", &progress,
 			    N_("do not show progress meter"), 0),
@@ -3560,8 +3592,12 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 			 N_("create packs suitable for shallow fetches")),
 		OPT_BOOL(0, "honor-pack-keep", &ignore_packed_keep_on_disk,
 			 N_("ignore packs that have companion .keep file")),
+		OPT_BOOL(0, "assume-kept-packs-closed", &assume_kept_packs_closed,
+			 N_("assume the union of kept packs is closed under reachability")),
 		OPT_STRING_LIST(0, "keep-pack", &keep_pack_list, N_("name"),
 				N_("ignore this pack")),
+		OPT_BOOL(0, "keep-pack-stdin", &keep_pack_stdin,
+			 N_("read the list of kept packs from stdin")),
 		OPT_INTEGER(0, "compression", &pack_compression_level,
 			    N_("pack compression level")),
 		OPT_SET_INT(0, "keep-true-parents", &grafts_replace_parents,
@@ -3651,6 +3687,8 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 		use_internal_rev_list = 1;
 		strvec_push(&rp, "--unpacked");
 	}
+	if (assume_kept_packs_closed)
+		use_internal_rev_list = 1;
 
 	if (exclude_promisor_objects) {
 		use_internal_rev_list = 1;
@@ -3722,6 +3760,11 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 	if (progress && all_progress_implied)
 		progress = 2;
 
+	if (keep_pack_stdin) {
+		if (!use_internal_rev_list)
+			die(_("--keep-pack-stdin requires --revs"));
+		collect_kept_packs(&keep_pack_list);
+	}
 	add_extra_kept_packs(&keep_pack_list);
 	if (ignore_packed_keep_on_disk) {
 		struct packed_git *p;
@@ -3730,6 +3773,14 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 				break;
 		if (!p) /* no keep-able packs found */
 			ignore_packed_keep_on_disk = 0;
+	}
+	if (assume_kept_packs_closed) {
+		if (ignore_packed_keep_on_disk && ignore_packed_keep_in_core)
+			strvec_push(&rp, "--no-kept-objects");
+		else if (ignore_packed_keep_on_disk)
+			strvec_push(&rp, "--no-kept-objects=on-disk");
+		else if (ignore_packed_keep_in_core)
+			strvec_push(&rp, "--no-kept-objects=in-core");
 	}
 	if (local) {
 		/*
@@ -3755,7 +3806,7 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 	if (!use_internal_rev_list)
 		read_object_list_from_stdin();
 	else {
-		get_object_list(rp.nr, rp.v);
+		get_object_list(rp.nr, rp.v, !keep_pack_stdin);
 		strvec_clear(&rp);
 	}
 	cleanup_preferred_base();
